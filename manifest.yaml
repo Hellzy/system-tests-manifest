@@ -1,0 +1,7 @@
+library:
+    language: golang
+    released:
+    - test_name: "test_request_uri"
+      version: "1.51.0"
+    - test_name: "test_request_method"
+      version: "1.51.0"
