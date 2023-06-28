@@ -1,9 +1,9 @@
-golang:
-    released:
-    - test_name: "test_request_uri"
-      version: "1.51.0"
-    - test_name: "test_request_method"
-      version: "1.51.0"
-    irrelevant:
-    - test_name: "test_cookies"
-      reason: "no idea"
+tracer: golang
+released:
+  - name: "test_request_uri"
+    version: "1.51.0"
+  - name: "test_request_method"
+    version: "1.51.0"
+irrelevant:
+  - name: "test_cookies"
+    reason: "no idea"
