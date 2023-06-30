@@ -1,71 +1,123 @@
-from typing import Optional, List
+from typing import Dict, Optional, List, TypedDict, cast, overload
 import libcst as cst
 import yaml
+import sys
 import collections
 
+class TestDeclaration(TypedDict):
+    name: str
+    version: str
+    reason: str
+
+
+class TracerManifest(TypedDict):
+    released: Optional[List[TestDeclaration]]
+    irrelevant: Optional[List[TestDeclaration]]
+    bug: Optional[List[TestDeclaration]]
+
+    tracer: str
+
+
+def comp_operator(op: str) -> cst.BaseCompOp:
+    if op == "==":
+        return cst.Equal()
+    elif op == "!=":
+        return cst.NotEqual()
+    elif op == "<=":
+        return cst.LessThanEqual()
+    elif op == "<":
+        return cst.LessThan
+    elif op == ">=":
+        return cst.GreaterThanEqual()
+    elif op == ">":
+        return cst.GreaterThan()
 
 # Set of helpers to generate verbose cst types
 
-def cstContextArg(ctxArg: str, val: str) -> cst.Arg:
-    return  cst.Arg(keyword=cst.Attribute(value=cst.Name("context"), attr=cst.Name(ctxArg)), value=cst.SimpleString(f'"{val}"'))
+def str_comp(lhs: cst.BaseExpression, rhs: str, op: str) -> cst.Comparison:
+    return cst.Comparison(left=lhs,
+                          comparisons=[cst.ComparisonTarget(operator=comp_operator(op),
+                                                            comparator=string(rhs))])
 
-def cstArg(arg: str, val: str) -> cst.Arg:
-    return cst.Arg(keyword=cst.Name(value=arg), value=cst.SimpleString(f'"{val}"'))
+def context_arg(ctxArg: str, val: str) -> cst.Arg:
+    return  cst.Arg(keyword=cst.Attribute(value=cst.Name("context"), attr=cst.Name(ctxArg)), value=string(val))
 
-def cstDecorator(funcName: str, args: List[cst.Arg]) -> cst.Decorator:
+def string(s: str) -> cst.SimpleString:
+    return cst.SimpleString(f'"{s}"')
+
+def arg(val: cst.BaseExpression) -> cst.Arg:
+    return cst.Arg(value=val)
+
+def kw_arg(kw: str, val) -> cst.Arg:
+    return cst.Arg(keyword=cst.Name(value=kw), value=val)
+
+def attr(base: str, attribute: str) -> cst.Attribute:
+    return cst.Attribute(value=cst.Name(base), attr=cst.Name(attribute))
+
+def decorator(funcName: str, args: List[cst.Arg]) -> cst.Decorator:
     return cst.Decorator(decorator=cst.Call(
         func=cst.Name(value=funcName),
         args=args
     ))
 
-def genReleasedDec(version):
-    args = [cst.Arg(keyword=cst.Name(value="golang"), value=cst.SimpleString(f'"{version}"'))]
-    return cstDecorator("released", args)
+# Generate @release decorator
+def release(library: str, version: str) -> cst.Decorator:
+    args = [cst.Arg(keyword=cst.Name(value=library), value=string(version))]
+    return decorator("released", args)
 
-def genIrrelevantDec(map):
-    reason = map["reason"]
-    args = [cstContextArg("library", "golang"), cstArg("reason", reason)]
+# Generate @irrelevant decorator
+def irrelevant(library: str, reason: str) -> cst.Decorator:
+    args = [arg(str_comp(attr("context", "library"),library, "==")), kw_arg("reason", string(reason))]
     return cst.Decorator(decorator=cst.Call(
         func=cst.Name(value="irrelevant"),
         args=args
     ))
 
-def gen_decorators(yml) -> 'dict[str, list]':
-    decs = collections.defaultdict(list)
+# Generate @irrelevant decorator
+def bug(library,reason) -> cst.Decorator:
+    return
 
-    for keyDec, decorators in yml.items():
-        for map in decorators:
-            testName = map["test_name"]
-            if keyDec == "released":
-                decs[testName].append(genReleasedDec(map["version"]))
-            elif keyDec == "irrelevant":
-                decs[testName].append(genIrrelevantDec(map))
+def gen_decorators(manifest: TracerManifest) -> Dict[str, List[cst.Decorator]]:
+    decs = collections.defaultdict(list)
+    lib = manifest["tracer"]
+
+    if "released" in manifest:
+        for test_entry in manifest["released"]:
+            decs[test_entry["name"]].append(release(lib, test_entry["version"]))
+    if "irrelevant" in manifest:
+        for test_entry in manifest["irrelevant"]:
+            decs[test_entry["name"]].append(irrelevant(lib, test_entry["reason"]))
 
     return decs
 
 class MetadataWriter(cst.CSTTransformer):
     def __init__(self):
         super().__init__()
-        #TODO: store manifest parsed metadata
-
-    def leave_FunctionDef(self, original_node: cst.FunctionDef, updated_node : cst.FunctionDef) -> cst.FunctionDef:
-        if original_node.name.value in decs:
-            print("True for " + original_node.name.value)
-            return updated_node.with_changes(decorators=decs[original_node.name.value])
-        return updated_node
+        with open(manifest_path) as fp:
+            self.manifest = cast(TracerManifest, yaml.load(fp, yaml.CLoader))
+            self.decs = gen_decorators(self.manifest)
 
     def leave_ClassDef(self, original_node: cst.ClassDef, updated_node : cst.ClassDef) -> cst.ClassDef:
-        if original_node.name.value in decs:
-            return updated_node.with_changes(decorators=decs[original_node.name.value])
-        return updated_node
+        if not original_node.name.value.startswith("Test_"):
+            return updated_node
+        decorators = [release("golang", "?")]
+        if original_node.name.value in self.decs:
+            decorators = self.decs[original_node.name.value]
+        return updated_node.with_changes(decorators=decorators)
 
+    def leave_FunctionDef(self, original_node: cst.FunctionDef, updated_node : cst.FunctionDef) -> cst.FunctionDef:
+        if not original_node.name.value.startswith("test_"):
+            return updated_node
+        decorators = []
+        if original_node.name.value in self.decs:
+            decorators = self.decs[original_node.name.value]
+        return updated_node.with_changes(decorators=decorators)
 
-with open("manifest.yaml", "r") as yml_file:
-    yml = yaml.safe_load(yml_file)
-
-
-mapping={key: yml["golang"][key] for key in yml["golang"]}
-decs = gen_decorators(mapping)
-module = cst.parse_module(open("test_blocking_addresses.py").read()).visit(MetadataWriter())
-with open("modified.py", "w+") as out:
+file="test_addresses.py"
+if len(sys.argv) != 3:
+    print("Usage: %s <path/to/manifest.yaml> <path/to/test.py>")
+manifest_path = sys.argv[1]
+file=sys.argv[2]
+module = cst.parse_module(open(file).read()).visit(MetadataWriter())
+with open(file, "w+") as out:
     out.write(module.code)
